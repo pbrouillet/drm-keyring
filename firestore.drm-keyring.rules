@@ -1,0 +1,358 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model (@pbrouillet/drm-keyring/firebase)
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: drmKeyrings
+// Document ID: {uid} (must equal request.auth.uid)
+// Purpose: Stores a single user's E2EE DrmKeyringEncryptedBackup document
+//          (FirestoreKeyringBackupDoc) written by FirebaseKeyringSyncProvider.
+// Required Fields:
+//   - ownerId: string (required, immutable on update, == request.auth.uid)
+//   - schemaVersion: int (required, == 1)
+//   - app: string (required, 1..64 chars)
+//   - backupId: string (required, 1..64 chars)
+//   - createdAt: int (required, >= 0)
+//   - keyCount: int (required, 1..500)
+//   - keyFingerprints: list (required, size 1..500, size == keyCount, string elements 1..32 chars)
+//   - cipher: string (required, == 'AES-256-GCM')
+//   - kdf: string (required, == 'PBKDF2-SHA256')
+//   - iterations: int (required, 10000..5000000)
+//   - saltB64: string (required, 16..128 chars)
+//   - ivB64: string (required, 12..64 chars)
+//   - ciphertextB64: string (required, 16..1048576 chars)
+//   - sizeBytes: int (required, 0..1048576)
+//   - modifiedTime: string (required, 1..64 chars)
+//   - updatedAt: int (required, >= 0)
+// Optional Fields:
+//   - backupHint: string (optional, 0..80 chars)
+//
+// Collection: drmManagedKeys
+// Document ID: {uid}__{keyId} (must equal request.auth.uid + '__' + data.keyId)
+// Purpose: Stores individual wrapped DrmManagedKey documents
+//          (FirestoreManagedKeyDoc) written by FirestoreKeyringStore.
+// Required Fields:
+//   - ownerId: string (required, immutable on update, == request.auth.uid)
+//   - keyId: string (required, immutable on update, 1..80 chars)
+//   - label: string (required, 1..64 chars)
+//   - fingerprint: string (required, immutable on update, 1..32 chars)
+//   - generation: int (required, 1..100000)
+//   - status: string (required, 'active' or 'retired')
+//   - isDefault: bool (required)
+//   - createdAt: int (required, immutable on update, >= 0)
+//   - updatedAt: int (required, >= 0)
+//   - kdf: string (required, == 'PBKDF2-SHA256')
+//   - iterations: int (required, 10000..5000000)
+//   - saltB64: string (required, 16..128 chars)
+//   - wrapIvB64: string (required, 12..64 chars)
+//   - wrappedKeyB64: string (required, 16..512 chars)
+// Optional Fields:
+//   - rotatedAt: int (optional, >= 0)
+//   - rotatedFromKeyId: string (optional, 1..80 chars)
+//   - rotatedToKeyId: string (optional, 1..80 chars)
+//   - keyHint: string (optional, 0..80 chars)
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net for all collections and subcollections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the user is authenticated with a verified email
+    function isAuthenticated() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    // Check if authenticated user owns the target userId
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if authenticated user owns the existing document via ownerId
+    function isDocOwner() {
+      return isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Verify ownerId hasn't been tampered with on create
+    function uidUnchanged() {
+      return !('ownerId' in request.resource.data) ||
+        request.resource.data.ownerId == request.auth.uid;
+    }
+
+    // Ensure ownerId field is not modified on update
+    function uidNotModified() {
+      return !('ownerId' in request.resource.data) ||
+        (resource != null && request.resource.data.ownerId == resource.data.ownerId);
+    }
+
+    // Validate required fields exist
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Validate document contains only allowed fields
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Validate immutable fields have not changed on update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Validate string type and bounded length
+    function validStringValue(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // Validate optional string field on a document map
+    function isValidOptionalString(data, field, minLen, maxLen) {
+      return !(field in data) || validStringValue(data[field], minLen, maxLen);
+    }
+
+    // Validate non-negative integer
+    function isNonNegativeInt(val) {
+      return val is int && val >= 0;
+    }
+
+    // Validate bounded integer
+    function isIntInRange(val, minVal, maxVal) {
+      return val is int && val >= minVal && val <= maxVal;
+    }
+
+    // Validate a single key fingerprint element
+    function isValidFingerprintElem(val) {
+      return validStringValue(val, 1, 32);
+    }
+
+    // Validate keyFingerprints list bounds and element types/lengths.
+    // Note: CEL has no loops and caps requests at 1,000 evaluated expressions,
+    // so we enforce exact list size (1..500, matching keyCount) and validate
+    // the head (indices 0..24) plus tail element to stay safely under limits.
+    function isValidKeyFingerprintList(arr, expectedCount) {
+      return arr is list
+        && arr.size() >= 1
+        && arr.size() <= 500
+        && arr.size() == expectedCount
+        && isValidFingerprintElem(arr[0])
+        && isValidFingerprintElem(arr[arr.size() - 1])
+        && (arr.size() < 2 || isValidFingerprintElem(arr[1]))
+        && (arr.size() < 3 || isValidFingerprintElem(arr[2]))
+        && (arr.size() < 4 || isValidFingerprintElem(arr[3]))
+        && (arr.size() < 5 || isValidFingerprintElem(arr[4]))
+        && (arr.size() < 6 || isValidFingerprintElem(arr[5]))
+        && (arr.size() < 7 || isValidFingerprintElem(arr[6]))
+        && (arr.size() < 8 || isValidFingerprintElem(arr[7]))
+        && (arr.size() < 9 || isValidFingerprintElem(arr[8]))
+        && (arr.size() < 10 || isValidFingerprintElem(arr[9]))
+        && (arr.size() < 11 || isValidFingerprintElem(arr[10]))
+        && (arr.size() < 12 || isValidFingerprintElem(arr[11]))
+        && (arr.size() < 13 || isValidFingerprintElem(arr[12]))
+        && (arr.size() < 14 || isValidFingerprintElem(arr[13]))
+        && (arr.size() < 15 || isValidFingerprintElem(arr[14]))
+        && (arr.size() < 16 || isValidFingerprintElem(arr[15]))
+        && (arr.size() < 17 || isValidFingerprintElem(arr[16]))
+        && (arr.size() < 18 || isValidFingerprintElem(arr[17]))
+        && (arr.size() < 19 || isValidFingerprintElem(arr[18]))
+        && (arr.size() < 20 || isValidFingerprintElem(arr[19]))
+        && (arr.size() < 21 || isValidFingerprintElem(arr[20]))
+        && (arr.size() < 22 || isValidFingerprintElem(arr[21]))
+        && (arr.size() < 23 || isValidFingerprintElem(arr[22]))
+        && (arr.size() < 24 || isValidFingerprintElem(arr[23]))
+        && (arr.size() < 25 || isValidFingerprintElem(arr[24]));
+    }
+
+    // Check if a drmManagedKeys docId is prefixed by "<request.auth.uid>__"
+    function hasOwnKeyDocPrefix(docId) {
+      return docId.size() > request.auth.uid.size() + 2
+        && docId[0:request.auth.uid.size() + 2] == request.auth.uid + '__';
+    }
+
+    // ===============================================================
+    // Domain Validators (Used in BOTH create and update)
+    // ===============================================================
+
+    function isValidDrmKeyringBackup(data) {
+      return data.keys().hasAll([
+          'ownerId',
+          'schemaVersion',
+          'app',
+          'backupId',
+          'createdAt',
+          'keyCount',
+          'keyFingerprints',
+          'cipher',
+          'kdf',
+          'iterations',
+          'saltB64',
+          'ivB64',
+          'ciphertextB64',
+          'sizeBytes',
+          'modifiedTime',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'schemaVersion',
+          'app',
+          'backupId',
+          'createdAt',
+          'keyCount',
+          'keyFingerprints',
+          'cipher',
+          'kdf',
+          'iterations',
+          'saltB64',
+          'ivB64',
+          'ciphertextB64',
+          'sizeBytes',
+          'modifiedTime',
+          'updatedAt',
+          'backupHint'
+        ])
+        && data.ownerId is string
+        && data.ownerId == request.auth.uid
+        && data.schemaVersion is int
+        && data.schemaVersion == 1
+        && validStringValue(data.app, 1, 64)
+        && validStringValue(data.backupId, 1, 64)
+        && isNonNegativeInt(data.createdAt)
+        && isIntInRange(data.keyCount, 1, 500)
+        && isValidKeyFingerprintList(data.keyFingerprints, data.keyCount)
+        && data.cipher is string
+        && data.cipher == 'AES-256-GCM'
+        && data.kdf is string
+        && data.kdf == 'PBKDF2-SHA256'
+        && isIntInRange(data.iterations, 10000, 5000000)
+        && validStringValue(data.saltB64, 16, 128)
+        && validStringValue(data.ivB64, 12, 64)
+        && validStringValue(data.ciphertextB64, 16, 1048576)
+        && isIntInRange(data.sizeBytes, 0, 1048576)
+        && validStringValue(data.modifiedTime, 1, 64)
+        && isNonNegativeInt(data.updatedAt)
+        && isValidOptionalString(data, 'backupHint', 0, 80);
+    }
+
+    function isValidDrmManagedKey(data) {
+      return data.keys().hasAll([
+          'ownerId',
+          'keyId',
+          'label',
+          'fingerprint',
+          'generation',
+          'status',
+          'isDefault',
+          'createdAt',
+          'updatedAt',
+          'kdf',
+          'iterations',
+          'saltB64',
+          'wrapIvB64',
+          'wrappedKeyB64'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'keyId',
+          'label',
+          'fingerprint',
+          'generation',
+          'status',
+          'isDefault',
+          'createdAt',
+          'updatedAt',
+          'kdf',
+          'iterations',
+          'saltB64',
+          'wrapIvB64',
+          'wrappedKeyB64',
+          'rotatedAt',
+          'rotatedFromKeyId',
+          'rotatedToKeyId',
+          'keyHint'
+        ])
+        && data.ownerId is string
+        && data.ownerId == request.auth.uid
+        && validStringValue(data.keyId, 1, 80)
+        && validStringValue(data.label, 1, 64)
+        && validStringValue(data.fingerprint, 1, 32)
+        && isIntInRange(data.generation, 1, 100000)
+        && data.status is string
+        && data.status in ['active', 'retired']
+        && data.isDefault is bool
+        && isNonNegativeInt(data.createdAt)
+        && isNonNegativeInt(data.updatedAt)
+        && data.kdf is string
+        && data.kdf == 'PBKDF2-SHA256'
+        && isIntInRange(data.iterations, 10000, 5000000)
+        && validStringValue(data.saltB64, 16, 128)
+        && validStringValue(data.wrapIvB64, 12, 64)
+        && validStringValue(data.wrappedKeyB64, 16, 512)
+        && (!('rotatedAt' in data) || isNonNegativeInt(data.rotatedAt))
+        && (
+          !('rotatedFromKeyId' in data)
+          || (validStringValue(data.rotatedFromKeyId, 1, 80) && data.rotatedFromKeyId != data.keyId)
+        )
+        && (
+          !('rotatedToKeyId' in data)
+          || (validStringValue(data.rotatedToKeyId, 1, 80) && data.rotatedToKeyId != data.keyId)
+        )
+        && isValidOptionalString(data, 'keyHint', 0, 80);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /drmKeyrings/{docId} {
+      allow get, delete: if isAuthenticated()
+        && (
+          (isOwner(docId) && resource == null)
+          || (resource != null && isDocOwner())
+        );
+
+      allow list: if isDocOwner();
+
+      allow create: if isOwner(docId)
+        && uidUnchanged()
+        && isValidDrmKeyringBackup(request.resource.data);
+
+      allow update: if isOwner(docId)
+        && resource != null
+        && isDocOwner()
+        && uidNotModified()
+        && areImmutableFieldsUnchanged(['ownerId'])
+        && isValidDrmKeyringBackup(request.resource.data);
+    }
+
+    match /drmManagedKeys/{docId} {
+      allow get, delete: if isAuthenticated()
+        && (
+          (resource == null && hasOwnKeyDocPrefix(docId))
+          || (resource != null && isDocOwner())
+        );
+
+      allow list: if isDocOwner();
+
+      allow create: if isAuthenticated()
+        && uidUnchanged()
+        && isValidDrmManagedKey(request.resource.data)
+        && docId == request.auth.uid + '__' + request.resource.data.keyId;
+
+      allow update: if resource != null
+        && isDocOwner()
+        && uidNotModified()
+        && areImmutableFieldsUnchanged(['ownerId', 'keyId', 'fingerprint', 'createdAt'])
+        && isValidDrmManagedKey(request.resource.data);
+    }
+  }
+}

@@ -215,6 +215,7 @@ export class VolatileKeyringCache {
             }
             this.scheduleExpiryCheck(nextExpiryDelayMs);
         }, Math.max(1_000, delayMs));
+        this.expiryTimer.unref?.();
     }
 }
 //# sourceMappingURL=volatileCache.js.map

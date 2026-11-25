@@ -22,9 +22,10 @@ Zero-knowledge client-side Personal DRM (`.ndrm`), Managed Keyring Vault, volati
 +---------------------------+  +------------------------------------------+
 | KeyringStore              |  | CloudKeyringSyncProvider                 |
 | - IndexedDbKeyringStore   |  | - GoogleDriveKeyringSyncProvider         |
-| - MemoryKeyringStore      |  |   (appDataFolder via Drive v3 API)       |
-+---------------------------+  | - MemoryCloudKeyringSyncProvider         |
-                               +------------------------------------------+
+| - SqliteKeyringStore      |  | - FirebaseKeyringSyncProvider            |
+| - FirestoreKeyringStore   |  | - SqliteKeyringSyncProvider              |
+| - MemoryKeyringStore      |  | - MemoryCloudKeyringSyncProvider         |
++---------------------------+  +------------------------------------------+
               |
               v
 +-------------------------------------------------------------------------+
@@ -135,7 +136,50 @@ await manager.createKey({
 });
 ```
 
-### 3. Volatile RAM Passphrase Cache
+### 3. SQLite Keyring Store & Sync (`node:sqlite`, `better-sqlite3`, `bun:sqlite`, or async `SqliteExecutor`)
+
+```ts
+import { DatabaseSync } from 'node:sqlite';
+import { DrmKeyringManager } from '@pbrouillet/drm-keyring';
+import { SqliteKeyringStore, SqliteKeyringSyncProvider } from '@pbrouillet/drm-keyring/sqlite';
+
+const db = new DatabaseSync('./vault.sqlite');
+
+const manager = new DrmKeyringManager({
+  store: new SqliteKeyringStore({ database: db }),
+  syncProvider: new SqliteKeyringSyncProvider({
+    database: db,
+    ownerId: 'user-123',
+  }),
+});
+
+await manager.load();
+```
+
+### 4. Firebase Firestore Keyring Sync & Hardened Rules
+
+```ts
+import { getFirestore } from 'firebase/firestore';
+import { DrmKeyringManager, IndexedDbKeyringStore } from '@pbrouillet/drm-keyring';
+import {
+  FirebaseKeyringSyncProvider,
+  FirestoreKeyringStore,
+} from '@pbrouillet/drm-keyring/firebase';
+
+const db = getFirestore();
+
+const manager = new DrmKeyringManager({
+  store: new IndexedDbKeyringStore(), // or new FirestoreKeyringStore({ db, getOwnerId: () => auth.currentUser?.uid ?? null })
+  syncProvider: new FirebaseKeyringSyncProvider({
+    db,
+    getOwnerId: () => auth.currentUser?.uid ?? null,
+  }),
+});
+```
+
+Deploy or merge [`firestore.drm-keyring.rules`](./firestore.drm-keyring.rules) into your Firebase project's Firestore rules to enforce `ownerId == request.auth.uid`, email verification, and anti-shadow-field validation on `drmKeyrings` and `drmManagedKeys`.
+
+### 5. Volatile RAM Passphrase Cache
 
 ```ts
 import { VolatileKeyringCache } from '@pbrouillet/drm-keyring';
@@ -153,4 +197,6 @@ const candidates = cache.resolveCandidates('drmk_123');
 
 - **`@pbrouillet/drm-keyring`**: Types, constants, errors, Web Crypto DRM operations (`createManagedDrmKey`, `rotateManagedDrmKey`, `encryptWithPersonalDrm`, `encryptWithManagedDrmKey`, `decryptWithPersonalDrm`, `decryptWithManagedDrmKey`, `rewrapDrmKey`), `.ndrm` binary container tools (`packNdrmContainer`, `unpackNdrmContainer`, `peekNdrmContainerEnvelope`, `peekRemoteNdrmEnvelope`), keyring backup/session crypto, `VolatileKeyringCache`, `IndexedDbKeyringStore`, `MemoryKeyringStore`, `MemoryCloudKeyringSyncProvider`, and `DrmKeyringManager`.
 - **`@pbrouillet/drm-keyring/google-drive`**: `GoogleDriveKeyringSyncProvider` and functional Google Drive `appDataFolder` helpers (`inspectDriveDrmKeyringBackup`, `pullDrmKeyringBackupFromDrive`, `pushDrmKeyringBackupToDrive`, `deleteDrmKeyringBackupFromDrive`).
-- **`@pbrouillet/drm-keyring/react`**: `useDrmKeyringManager`, `CloudKeyringPanel`, `DrmKeyVaultPanel`, `DrmKeyringExportImportWizard`, `UnlockDrmModal`, and `KeyringConfirmDialog`.
+- **`@pbrouillet/drm-keyring/sqlite`**: `SqliteKeyringStore`, `SqliteKeyringSyncProvider`, and `createSyncSqliteExecutor` (works with `node:sqlite`, `better-sqlite3`, `bun:sqlite`, or any async `SqliteExecutor`).
+- **`@pbrouillet/drm-keyring/firebase`**: `FirebaseKeyringSyncProvider`, `FirestoreKeyringStore`, `createFirebaseFirestoreAdapter`, and `classifyFirebaseKeyringError` (optional `firebase` peer dependency).
+- **`@pbrouillet/drm-keyring/react`**: `useDrmKeyringManager`, `CloudKeyringPanel`, `DrmKeyVaultPanel`, `DrmKeyringExportImportWizard`, `UnlockDrmModal`, and `KeyringConfirmDialog` (optional `react` and `lucide-react` peer dependencies).

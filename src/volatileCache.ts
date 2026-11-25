@@ -306,5 +306,6 @@ export class VolatileKeyringCache {
       }
       this.scheduleExpiryCheck(nextExpiryDelayMs);
     }, Math.max(1_000, delayMs));
+    (this.expiryTimer as { unref?: () => void }).unref?.();
   }
 }

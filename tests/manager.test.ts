@@ -169,6 +169,7 @@ test('DrmKeyringManager manages keys, rotation with onBeforeCommit + volatile mi
   managerA.dispose();
   managerB.dispose();
   managerC.dispose();
+  volatileA.dispose();
 });
 
 test('DrmKeyringManager lazy-prunes expired volatile entries and does not migrate an expired rotated key while another key is active', async () => {
@@ -221,4 +222,5 @@ test('DrmKeyringManager lazy-prunes expired volatile entries and does not migrat
   assert.equal(manager.getState().hasActiveVolatileKey, false);
 
   manager.dispose();
+  volatile.dispose();
 });

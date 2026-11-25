@@ -28,9 +28,10 @@
 
 ## 4. Double-Layer Keyring Backup & Cloud Sync
 
-- `DrmKeyringEncryptedBackup` (`.nkey.json` or Google Drive `appDataFolder` file `nocturne-drm-keyring-v1.enc.json`) seals the array of already-wrapped `DrmManagedKey` objects inside an outer `AES-256-GCM` envelope.
+- `DrmKeyringEncryptedBackup` (`.nkey.json`, Google Drive `appDataFolder` file `nocturne-drm-keyring-v1.enc.json`, Firestore `drmKeyrings/{uid}`, or SQLite `drm_keyring_backups`) seals the array of already-wrapped `DrmManagedKey` objects inside an outer `AES-256-GCM` envelope.
 - Canonical AAD binds `app`, `schemaVersion`, `backupId`, `createdAt`, `keyCount`, and `keyFingerprints` so any tampering with cleartext header metadata invalidates the GCM tag.
 - Every cloud push rotates to a new random 96-bit IV; rotating the Master Passphrase generates a new 128-bit PBKDF2 salt so stale sessions on other devices fail authentication cleanly and lock immediately.
+- When using `@pbrouillet/drm-keyring/firebase`, deploy [`firestore.drm-keyring.rules`](./firestore.drm-keyring.rules) to enforce `ownerId == request.auth.uid`, verified-email authentication, strict field-size limits, and anti-shadow-field validation.
 
 ## 5. Volatile Memory Hygiene
 
