@@ -1,0 +1,205 @@
+export const DEFAULT_VOLATILE_KEYRING_TTL_MINUTES = 15;
+export const DEFAULT_VOLATILE_KEYRING_TTL_MS = DEFAULT_VOLATILE_KEYRING_TTL_MINUTES * 60_000;
+export function pruneExpiredVolatileKeyringEntries(cache, now = Date.now(), isReaderOpen = false) {
+    if (!isReaderOpen) {
+        for (const [key, entry] of cache.entries()) {
+            if (entry.expiresAt <= now) {
+                cache.delete(key);
+            }
+        }
+    }
+    if (cache.size === 0) {
+        return { nextExpiryDelayMs: null, hasActiveEntries: false };
+    }
+    let earliestExpiry = 0;
+    for (const entry of cache.values()) {
+        if (earliestExpiry === 0 || entry.expiresAt < earliestExpiry) {
+            earliestExpiry = entry.expiresAt;
+        }
+    }
+    const nextExpiryDelayMs = Math.max(1_000, earliestExpiry - now);
+    return {
+        nextExpiryDelayMs,
+        hasActiveEntries: true,
+    };
+}
+export function upsertVolatileKeyringEntry(cache, cacheKey, passphrase, durationMs = DEFAULT_VOLATILE_KEYRING_TTL_MS, now = Date.now(), isReaderOpen = false) {
+    pruneExpiredVolatileKeyringEntries(cache, now, isReaderOpen);
+    if (durationMs > 0 && passphrase.length > 0) {
+        cache.set(cacheKey, {
+            passphrase,
+            durationMs,
+            expiresAt: now + durationMs,
+        });
+    }
+    return pruneExpiredVolatileKeyringEntries(cache, now, isReaderOpen);
+}
+export function touchVolatileKeyringEntriesOnReaderClose(cache, now = Date.now()) {
+    for (const [key, entry] of cache.entries()) {
+        if (entry.durationMs > 0) {
+            cache.set(key, {
+                ...entry,
+                expiresAt: Math.max(entry.expiresAt, now + entry.durationMs),
+            });
+        }
+        else if (entry.expiresAt <= now) {
+            cache.delete(key);
+        }
+    }
+    return pruneExpiredVolatileKeyringEntries(cache, now, false);
+}
+export const touchVolatileKeyringEntriesOnSessionIdle = touchVolatileKeyringEntriesOnReaderClose;
+export function resolveVolatileKeyringCandidatePassphrases(cache, options = {}) {
+    const { preferredCacheKey, now = Date.now(), isReaderOpen = false } = options;
+    pruneExpiredVolatileKeyringEntries(cache, now, isReaderOpen);
+    const ordered = [];
+    const seenPassphrases = new Set();
+    if (preferredCacheKey) {
+        const exact = cache.get(preferredCacheKey);
+        if (exact && exact.passphrase) {
+            ordered.push({
+                cacheKey: preferredCacheKey,
+                passphrase: exact.passphrase,
+                durationMs: exact.durationMs,
+            });
+            seenPassphrases.add(exact.passphrase);
+        }
+    }
+    for (const [cacheKey, entry] of cache.entries()) {
+        if (!entry.passphrase || seenPassphrases.has(entry.passphrase))
+            continue;
+        seenPassphrases.add(entry.passphrase);
+        ordered.push({
+            cacheKey,
+            passphrase: entry.passphrase,
+            durationMs: entry.durationMs,
+        });
+    }
+    return ordered;
+}
+export class VolatileKeyringCache {
+    entries = new Map();
+    defaultTtlMs;
+    isSessionActive;
+    onAutoLock;
+    listeners = new Set();
+    expiryTimer = null;
+    pageHideCleanup = null;
+    constructor(options = {}) {
+        this.defaultTtlMs = options.defaultTtlMs ?? DEFAULT_VOLATILE_KEYRING_TTL_MS;
+        this.isSessionActive = options.isSessionActive ?? (() => false);
+        this.onAutoLock = options.onAutoLock;
+        if (options.bindPageHide &&
+            typeof globalThis !== 'undefined' &&
+            typeof globalThis.addEventListener === 'function') {
+            const target = globalThis;
+            const onPageHide = () => {
+                this.clear();
+            };
+            target.addEventListener('pagehide', onPageHide);
+            this.pageHideCleanup = () => {
+                target.removeEventListener('pagehide', onPageHide);
+            };
+        }
+    }
+    get size() {
+        return this.entries.size;
+    }
+    hasActiveEntries(now = Date.now()) {
+        const { hasActiveEntries } = pruneExpiredVolatileKeyringEntries(this.entries, now, this.isSessionActive());
+        return hasActiveEntries;
+    }
+    get(cacheKey) {
+        return this.entries.get(cacheKey);
+    }
+    upsert(cacheKey, passphrase, durationMs = this.defaultTtlMs, now = Date.now()) {
+        const result = upsertVolatileKeyringEntry(this.entries, cacheKey, passphrase, durationMs, now, this.isSessionActive());
+        this.scheduleExpiryCheck(result.nextExpiryDelayMs);
+        this.notify();
+        return result;
+    }
+    delete(cacheKey) {
+        const deleted = this.entries.delete(cacheKey);
+        if (this.entries.size === 0) {
+            this.clearTimer();
+        }
+        if (deleted) {
+            this.notify();
+        }
+        return deleted;
+    }
+    clear() {
+        const hadEntries = this.entries.size > 0;
+        this.entries.clear();
+        this.clearTimer();
+        if (hadEntries) {
+            this.notify();
+        }
+    }
+    touchOnSessionIdle(now = Date.now()) {
+        if (this.entries.size === 0) {
+            return { nextExpiryDelayMs: null, hasActiveEntries: false };
+        }
+        const result = touchVolatileKeyringEntriesOnReaderClose(this.entries, now);
+        if (!result.hasActiveEntries) {
+            this.clear();
+            return result;
+        }
+        this.scheduleExpiryCheck(result.nextExpiryDelayMs);
+        this.notify();
+        return result;
+    }
+    resolveCandidates(preferredCacheKey, now = Date.now()) {
+        return resolveVolatileKeyringCandidatePassphrases(this.entries, {
+            preferredCacheKey,
+            now,
+            isReaderOpen: this.isSessionActive(),
+        });
+    }
+    subscribe(listener) {
+        this.listeners.add(listener);
+        return () => {
+            this.listeners.delete(listener);
+        };
+    }
+    dispose() {
+        this.clearTimer();
+        this.entries.clear();
+        if (this.pageHideCleanup) {
+            this.pageHideCleanup();
+            this.pageHideCleanup = null;
+        }
+        this.listeners.clear();
+    }
+    notify() {
+        for (const listener of this.listeners) {
+            listener();
+        }
+    }
+    clearTimer() {
+        if (this.expiryTimer !== null) {
+            clearTimeout(this.expiryTimer);
+            this.expiryTimer = null;
+        }
+    }
+    scheduleExpiryCheck(delayMs) {
+        this.clearTimer();
+        if (delayMs === null)
+            return;
+        this.expiryTimer = setTimeout(() => {
+            this.expiryTimer = null;
+            if (this.isSessionActive()) {
+                this.scheduleExpiryCheck(60_000);
+                return;
+            }
+            const { nextExpiryDelayMs, hasActiveEntries } = pruneExpiredVolatileKeyringEntries(this.entries, Date.now(), false);
+            if (!hasActiveEntries) {
+                this.notify();
+                this.onAutoLock?.();
+                return;
+            }
+            this.scheduleExpiryCheck(nextExpiryDelayMs);
+        }, Math.max(1_000, delayMs));
+    }
+}
+//# sourceMappingURL=volatileCache.js.map

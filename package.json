@@ -1,0 +1,61 @@
+{
+  "name": "@pbrouillet/drm-keyring",
+  "version": "0.1.0",
+  "type": "module",
+  "private": false,
+  "description": "Zero-knowledge client-side Personal DRM (.ndrm), Managed Keyring Vault, volatile RAM key cache, and E2EE Cloud Keyring Sync library.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pbrouillet/drm-keyring.git"
+  },
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./google-drive": {
+      "types": "./dist/sync/googleDrive.d.ts",
+      "import": "./dist/sync/googleDrive.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "lucide-react": ">=0.400.0",
+    "react": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "lucide-react": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.0.0",
+    "lucide-react": "^0.546.0",
+    "react": "^19.0.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.2"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "check": "npm run typecheck && npm run build && npm test"
+  }
+}
