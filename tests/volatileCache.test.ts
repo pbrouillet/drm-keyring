@@ -104,6 +104,19 @@ test('VolatileKeyringCache class manages subscriptions, active-session deferral,
   cache.delete('k1');
   assert.equal(cache.size, 0);
 
+  // Lazy pruning in hasActiveEntries / resolveCandidates clears expired entries and notifies listeners
+  const notificationsBeforeLazyPrune = notifications;
+  cache.upsert('k2', 'secret-2', 5_000, t0);
+  assert.equal(cache.resolveCandidates('k2', t0 + 10_000).length, 0);
+  assert.equal(cache.size, 0);
+  assert.ok(notifications > notificationsBeforeLazyPrune + 1);
+
+  const notificationsBeforeHasActive = notifications;
+  cache.upsert('k3', 'secret-3', 5_000, t0);
+  assert.equal(cache.hasActiveEntries(t0 + 10_000), false);
+  assert.equal(cache.size, 0);
+  assert.ok(notifications > notificationsBeforeHasActive + 1);
+
   unsub();
   cache.dispose();
 });

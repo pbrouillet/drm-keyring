@@ -236,8 +236,9 @@ export class DrmKeyringManager {
     void this.pushCloudIfUnlocked(nextKeys);
 
     // Migrate active volatile RAM unlock entry if the rotated key was currently unlocked
+    this.volatileCache.hasActiveEntries();
     const activeVolatile = this.volatileCache.get(existingKey.keyId);
-    if (activeVolatile && (this.volatileCache.hasActiveEntries() || Date.now() < activeVolatile.expiresAt)) {
+    if (activeVolatile) {
       const remainingMs = Math.max(
         activeVolatile.durationMs || DEFAULT_VOLATILE_KEYRING_TTL_MS,
         activeVolatile.expiresAt - Date.now()

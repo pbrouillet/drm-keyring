@@ -161,11 +161,18 @@ export class VolatileKeyringCache {
   }
 
   hasActiveEntries(now: number = Date.now()): boolean {
+    const prevSize = this.entries.size;
     const { hasActiveEntries } = pruneExpiredVolatileKeyringEntries(
       this.entries,
       now,
       this.isSessionActive()
     );
+    if (this.entries.size !== prevSize) {
+      if (this.entries.size === 0) {
+        this.clearTimer();
+      }
+      this.notify();
+    }
     return hasActiveEntries;
   }
 
@@ -232,11 +239,19 @@ export class VolatileKeyringCache {
     preferredCacheKey?: string | null,
     now: number = Date.now()
   ): Array<{ cacheKey: string; passphrase: string; durationMs: number }> {
-    return resolveVolatileKeyringCandidatePassphrases(this.entries, {
+    const prevSize = this.entries.size;
+    const result = resolveVolatileKeyringCandidatePassphrases(this.entries, {
       preferredCacheKey,
       now,
       isReaderOpen: this.isSessionActive(),
     });
+    if (this.entries.size !== prevSize) {
+      if (this.entries.size === 0) {
+        this.clearTimer();
+      }
+      this.notify();
+    }
+    return result;
   }
 
   subscribe(listener: () => void): () => void {

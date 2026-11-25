@@ -170,3 +170,55 @@ test('DrmKeyringManager manages keys, rotation with onBeforeCommit + volatile mi
   managerB.dispose();
   managerC.dispose();
 });
+
+test('DrmKeyringManager lazy-prunes expired volatile entries and does not migrate an expired rotated key while another key is active', async () => {
+  const volatile = new VolatileKeyringCache({
+    isSessionActive: () => false,
+  });
+  const manager = new DrmKeyringManager({
+    store: new MemoryKeyringStore(),
+    volatileCache: volatile,
+  });
+  await manager.load();
+
+  const expiredKey = await manager.createKey({
+    label: 'Expiring Key',
+    passphrase: 'expiring-key-passphrase',
+    iterations: 10_000,
+  });
+  const activeKey = await manager.createKey({
+    label: 'Active Key',
+    passphrase: 'active-key-passphrase',
+    iterations: 10_000,
+  });
+
+  // Seed expiredKey with an already-expired entry, and activeKey with a live entry
+  const past = Date.now() - 60_000;
+  volatile.entries.set(expiredKey.keyId, {
+    passphrase: 'expiring-key-passphrase',
+    durationMs: 1_000,
+    expiresAt: past,
+  });
+  manager.cacheVolatilePassphrase(activeKey.keyId, 'active-key-passphrase', 60_000);
+  assert.equal(manager.getState().hasActiveVolatileKey, true);
+
+  // Rotating expiredKey must NOT migrate its expired volatile passphrase even though activeKey is live
+  const { newKey } = await manager.rotateKey(expiredKey.keyId, 'expiring-key-passphrase', {
+    newPassphrase: 'new-rotated-passphrase',
+    iterations: 10_000,
+  });
+  assert.equal(volatile.get(expiredKey.keyId), undefined);
+  assert.equal(volatile.get(newKey.keyId), undefined);
+  assert.equal(volatile.get(activeKey.keyId)?.passphrase, 'active-key-passphrase');
+
+  // Expiring activeKey and lazily checking resolveVolatileCandidates updates hasActiveVolatileKey
+  volatile.entries.set(activeKey.keyId, {
+    passphrase: 'active-key-passphrase',
+    durationMs: 1_000,
+    expiresAt: Date.now() - 10,
+  });
+  assert.deepEqual(manager.resolveVolatileCandidates(activeKey.keyId), []);
+  assert.equal(manager.getState().hasActiveVolatileKey, false);
+
+  manager.dispose();
+});

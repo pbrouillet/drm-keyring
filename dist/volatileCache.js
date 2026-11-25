@@ -106,7 +106,14 @@ export class VolatileKeyringCache {
         return this.entries.size;
     }
     hasActiveEntries(now = Date.now()) {
+        const prevSize = this.entries.size;
         const { hasActiveEntries } = pruneExpiredVolatileKeyringEntries(this.entries, now, this.isSessionActive());
+        if (this.entries.size !== prevSize) {
+            if (this.entries.size === 0) {
+                this.clearTimer();
+            }
+            this.notify();
+        }
         return hasActiveEntries;
     }
     get(cacheKey) {
@@ -150,11 +157,19 @@ export class VolatileKeyringCache {
         return result;
     }
     resolveCandidates(preferredCacheKey, now = Date.now()) {
-        return resolveVolatileKeyringCandidatePassphrases(this.entries, {
+        const prevSize = this.entries.size;
+        const result = resolveVolatileKeyringCandidatePassphrases(this.entries, {
             preferredCacheKey,
             now,
             isReaderOpen: this.isSessionActive(),
         });
+        if (this.entries.size !== prevSize) {
+            if (this.entries.size === 0) {
+                this.clearTimer();
+            }
+            this.notify();
+        }
+        return result;
     }
     subscribe(listener) {
         this.listeners.add(listener);
